@@ -1,7 +1,7 @@
 # CandyScript
 
 CandyScript is a lightweight yet superfast language for forging small web servers and RestAPIs.
-[![GPLv3 License](https://img.shields.io/badge/License-GPL%20v3-yellow.svg)](https://opensource.org/licenses/)
+This flavor is inspired from [littledivy/candyscript](https://github.com/littledivy/candyscript) but does a lot more.
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 
 ## Features
@@ -9,33 +9,37 @@ CandyScript is a lightweight yet superfast language for forging small web server
 * Line-by-line parser
 * One of the fastest web server powered by Nim's `asynchttpserver`
 * Short and efficient
-* No external database service required.
-* < 85 lines of Nim code!
+* < 400 lines of Nim code!
 * A single binary for everything
+* Interface with a SQLite database
+* Fetch external URLs
+* [Mustache](https://github.com/soasme/nim-mustache) templates
+* Get data from command lines
+* Basic variable replacement system
+* Authentication
 
 ## TODO
 
-* [ ] Add backend integration with other languages
-* [ ] Add multiple database integration
+* [ ] Add session handling
 * [ ] Use `httpbeast` instead of `asynchttpserver`
 
 ## Example
 
 ### Hello, World!
 
-```yaml
+```
 # this is a comment
-GET "/": Hello, World!
+GET / Hello, World!
 ```
 
 ## Building from source
 
-Use the Nim compiler [nim](https://nim-lang.org) to compile Bloom source code.
+Use the Nim compiler [nim](https://nim-lang.org) to compile source code.
 
 This code will run your candyscript server.
 ```bash
-nim c index.nim
-./index your_script.candy
+nimble build
+./candy your_script.candy
 ```
 
 ## Contributing
@@ -45,3 +49,4 @@ Please make sure to update tests as appropriate.
 
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)
+

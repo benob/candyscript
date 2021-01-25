@@ -1,0 +1,12 @@
+<h1>My nice blog</h1>
+<p>
+  <a href="/new">New post</a>
+</p>
+{{#data}}
+  <div>
+  <h3>{{title}}</h3>
+  <p>Author: {{author}}, date: {{date}} - <a href="/edit/{{id}}">Edit</a></p>
+  <p>{{body}}</p>
+  </div>
+{{/data}}
+<p><a href="/?page={{vars.nextPage}}">Load more</a></p>

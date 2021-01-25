@@ -1,6 +1,77 @@
-SET "port": 8000
-GET "/": file: server.candy
-GET "/yo": yo boi!
-POST "/": hello
-GET "/py": python: hi.py
-# this is a comment
+# TODO: 
+# modify env
+# use env as variables
+# use post parameters as variables
+# add a session system
+# handle file uploads
+
+PORT 8080
+# path to sqlite3 database
+DB user.db
+
+# setup static file dirs relative to current directory
+# files are served as if from /
+STATIC public
+
+# executed at startup
+STARTUP SHELL uname -a
+STARTUP SQL create table if not exists users (id integer primary key, name text)
+
+# a route is an HTTP verb, followed by a PATH definition and a set of actions separated by "|"
+# variables are defined by {identifier} and replaced in the action parameters
+# variables can be set in PATH elements or as query parameters
+
+# TEXT returns text
+GET / TEXT hello, care for some candy? 
+GET /hi/{name} TEXT hi {name}!
+
+# READ returns the content of an uncached file
+# /../ is replaced with /
+GET /loadavg READ /proc/loadavg
+GET /ex/{fn} READ ./{fn}
+
+# JSON returns some json data
+# can be piped to a mustache template where json data is carried in {{data}} and variables are in {{vars}}
+GET /json JSON {"a": 1, "b": 2}
+GET /json JSON {"a": 1, "b": 2} | VIEW views/json.html
+
+# SQL returns json representation of an sqlite query
+GET /user/{id} SQL select * from users where id = {id}
+PUT /user/{name} SQL insert into users (name) values ({id})
+DELETE /user/{id} SQL delete from users where id = {id}
+GET /users SQL select * from users | VIEW views/user.html
+# {offset} is derived from {limit} and {page} which default to 10 and 0
+# {nextPage} is always set to {page} + 1
+# after sql insert, last row id can be accessed with {last_insert_rowid}
+
+# FETCH: load an external url, use same content type
+GET /weather/{city} FETCH https://wttr.in/{city}?format=j1
+GET /weather.png FETCH https://wttr.in/.png
+GET /beers FETCH https://api.punkapi.com/v2/beers | VIEW views/beers.html
+
+# SHELL stdout + stderr from shell command, no variable interpolation
+GET /date SHELL date
+GET /uptime SHELL uptime
+
+# REDIRECT sets up a redirection with the Location header
+GET /google REDIRECT https://google.com
+
+# AUTH as a directive allows a user:password pair
+AUTH user:password
+
+# AUTH as an action requires a valid user:password pair to continue
+GET /restricted AUTH | TEXT You can read this secret
+
+# ideas for implementing AUTH
+#AUTH SQL select id from user where token = {token}
+#AUTH FILE tokens.txt
+#AUTH TOKEN 0a1927ajsgdhakjs7912y3ssj
+
+# ideas for implementing sessions
+# SESSION sql query: add result to session
+# SESSION|verb: require session, variables set in session are available
+# SESSION: clear session
+#GET /login/{name}/{password} SESSION select id as user_id from user where name = {name} and password = {password}
+#GET /session SESSION | TEXT Hi {user_id}
+#GET /logout SESSION
+

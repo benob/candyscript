@@ -1,0 +1,34 @@
+# simple blog
+
+PORT 8080
+STATIC public
+DB blog.db
+AUTH user:password
+STARTUP SQL create table if not exists blog (title text, author text, body text, date datetime)
+
+# {offset} is derived from {limit} and {page} which default to 10 and 0
+# {nextPage} is always set to {page} + 1
+GET / SQL select rowid as id, * from blog order by date desc limit {limit} offset {offset} \
+  | VIEW blog/posts.html
+
+# AUTH requires http authentication
+GET /new AUTH \
+  | VIEW blog/edit.html
+
+GET /edit/{id} AUTH \
+  | SQL select rowid as id, * from blog where rowid = {id} \
+  | VIEW blog/edit.html
+
+# after sql insert, last row id can be accessed with {last_insert_rowid}
+GET /insert AUTH \
+  | SQL insert into blog (title, author, body, date) values ({title}, {author}, {body}, datetime('now')) \
+  | REDIRECT /
+
+GET /modify/{id} AUTH \
+  | SQL update blog set title={title}, author={author}, body={body}, date=datetime('now') where rowid={id} \
+  | REDIRECT /
+
+GET /delete/{id} AUTH \
+  | SQL delete from blog where rowid = {id} \
+  | REDIRECT /
+
