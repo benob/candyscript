@@ -14,6 +14,7 @@ import strutils
 import tables
 import terminal
 import uri
+import httpform
 
 type ActionKind = enum
   Auth, Text, Read, SQL, Redirect, Shell, Fetch, View, Json
@@ -38,6 +39,7 @@ var
   staticPath {.threadvar.}: seq[string]
   routes {.threadvar.}: seq[Route]
   passwords {.threadvar.}: seq[string]
+  #formParser {.threadvar.}: AsyncHttpForm 
  
 stdout.styledWrite(fgBlue, "CandyScript is ready to show off", fgDefault, "\n")
 
@@ -45,6 +47,7 @@ mimeResolver = newMimetypes()
 routes = newSeq[Route]()
 staticPath = newSeq[string]()
 passwords = newSeq[string]()
+let formParser = newAsyncHttpForm(getTempDir(), true)
 
 if paramCount() > 0:
   for line in readFile(paramStr(1)).replace("\\\n", " ").split('\n'):
@@ -306,6 +309,12 @@ proc parseQuery(query: string): Table[string, string] =
     if name != "":
       result[name] = value
 
+proc parseBody(req: Request): Future[Table[string, string]] {.async, gcsafe.} =
+  if req.headers.hasKey("Content-Type"):
+    var (fields, files) = await formParser.parseAsync(req.headers["Content-Type"], req.body)
+    for name, value in fields:
+      result[$name] = value.str
+
 proc handler(req: Request) {.async, gcsafe.} =
   let 
     verb = $req.reqMethod
@@ -314,16 +323,18 @@ proc handler(req: Request) {.async, gcsafe.} =
 
   stdout.styledWrite(fgGreen, verb, fgDefault, " ", path, "\n")
 
-  var params = parseQuery(decodeUrl(req.url.query))
-  let page = params.getOrDefault("page", "0").parseInt
-  let limit = params.getOrDefault("limit", "10").parseInt
-  params["offset"] = $(page * limit)
-  params["nextPage"] = $(page + 1)
-  params["page"] = $page
-  params["limit"] = $limit
+  var 
+    bodyParams = await req.parseBody()
+    queryParams = parseQuery(decodeUrl(req.url.query))
+  let page = queryParams.getOrDefault("page", "0").parseInt
+  let limit = queryParams.getOrDefault("limit", "10").parseInt
+  queryParams["offset"] = $(page * limit)
+  queryParams["nextPage"] = $(page + 1)
+  queryParams["page"] = $page
+  queryParams["limit"] = $limit
 
   for route in routes:
-    if route.components.len == components.len:
+    if route.components.len == components.len and route.verb == verb:
       var 
         variables = initTable[string, string]()
         found = true
@@ -338,7 +349,9 @@ proc handler(req: Request) {.async, gcsafe.} =
             found = false
             break
       if found:
-        for key, value in params.pairs:
+        for key, value in bodyParams.pairs:
+          variables[key] = value
+        for key, value in queryParams.pairs:
           variables[key] = value
         await req.handleRoute(route, variables)
         return

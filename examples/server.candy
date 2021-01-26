@@ -25,6 +25,12 @@ STARTUP SQL create table if not exists users (id integer primary key, name text)
 GET / TEXT hello, care for some candy? 
 GET /hi/{name} TEXT hi {name}!
 
+# variables are extracted in order:
+# 1) from request path; i.e. curl -X POST localhost:8080/post/zzz
+# 2) from request body; i.e. curl -F a=zzz b=yyy localhost:8080/post/ttt
+# 3) from request query; i.e. curl -X POST 'localhost:8080/post/nnn?a=zzz&b=yyy'
+POST /post/{a} TEXT recieved a="{a}" b="{b}"
+
 # READ returns the content of an uncached file
 # /../ is replaced with /
 GET /loadavg READ /proc/loadavg
