@@ -32,9 +32,11 @@ This flavor is inspired from [littledivy/candyscript](https://github.com/littled
 GET / Hello, World!
 ```
 
+For a more advanced showcase, see [the examples](examples/server.candy)
+
 ## Building from source
 
-Use the Nim compiler [nim](https://nim-lang.org) to compile source code.
+Use the [Nim compiler](https://nim-lang.org) to compile source code.
 
 This code will run your candyscript server.
 ```bash
