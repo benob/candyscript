@@ -1,11 +1,14 @@
 # TODO: 
 # modify env
 # use env as variables
-# use post parameters as variables
 # add a session system
 # handle file uploads
 
 PORT 8080
+# directives are executed when in order
+# DIR change current directory (do it before loading the db)
+DIR examples/
+
 # path to sqlite3 database
 DB user.db
 
@@ -16,6 +19,9 @@ STATIC public
 # executed at startup
 STARTUP SHELL uname -a
 STARTUP SQL create table if not exists users (id integer primary key, name text)
+
+# ENV set environment variable
+ENV DEBUG 1
 
 # a route is an HTTP verb, followed by a PATH definition and a set of actions separated by "|"
 # variables are defined by {identifier} and replaced in the action parameters
@@ -72,12 +78,14 @@ GET /restricted AUTH | TEXT You can read this secret
 #AUTH SQL select id from user where token = {token}
 #AUTH FILE tokens.txt
 #AUTH TOKEN 0a1927ajsgdhakjs7912y3ssj
+#AUTH TYPE basic
 
 # ideas for implementing sessions
-# SESSION sql query: add result to session
+#POST /login SQL select id from users where name={name} and password={password} | SESSION user_id | REDIRECT /
+#GET /session TEXT Hi {SESSION:user_id}
+
 # SESSION|verb: require session, variables set in session are available
 # SESSION: clear session
 #GET /login/{name}/{password} SESSION select id as user_id from user where name = {name} and password = {password}
-#GET /session SESSION | TEXT Hi {user_id}
 #GET /logout SESSION
 

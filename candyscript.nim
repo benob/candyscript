@@ -1,11 +1,11 @@
-import asynchttpserver, asyncdispatch
+import asyncdispatch
+import asynchttpserver
 import base64
 import cgi
 import db_sqlite
 import httpClient
 import json
 import mimetypes
-import mustache
 import os
 import osproc
 import sequtils
@@ -14,6 +14,8 @@ import strutils
 import tables
 import terminal
 import uri
+
+import mustache
 import httpform
 
 type ActionKind* = enum
@@ -40,7 +42,7 @@ type CandyServer* = ref object
   formParser: AsyncHttpForm 
 
 proc initCandyServer*(verbose = false): CandyServer =
-  CandyServer(port: "8080", debug: existsEnv("DEBUG"), verbose: verbose, mimeResolver: newMimetypes(), routes: @[], passwords: @[], formParser: newAsyncHttpForm(getTempDir(), true), staticPaths: @["./"])
+  CandyServer(port: "8080", debug: getEnv("DEBUG") != "", verbose: verbose, mimeResolver: newMimetypes(), routes: @[], passwords: @[], formParser: newAsyncHttpForm(getTempDir(), true), staticPaths: @[])
 
 proc `$`(action: Action): string = $action.kind & " " & action.params
 proc `$`(route: Route): string = $route.verb & " " & route.path & "\n" & route.actions.mapIt("  " & $it).join("\n")
@@ -57,12 +59,18 @@ proc log(server: CandyServer, kind: LogKind = LogKind.None, message: string) =
       of Error: fgRed
       of None: fgDefault
     prefix = if kind == LogKind.None: "" else: $kind & ": "
-  if server.verbose or kind == Error or kind == Debug:
+  if kind == Debug and not server.debug:
+    return
+  if server.verbose or kind == Error:
     stdout.styledWrite(color, prefix, fgDefault, message, "\n")
 
 proc parseScript*(server: CandyServer, script: string): bool =
   for line in script.replace("\\\n", " ").split('\n'):
-    if line.strip().startswith("#") or line.strip() == "":
+    var line = line
+    let found = line.find('#')
+    if found >= 0:
+      line = line[0..found - 1]
+    if line.strip().startswith('#') or line.strip() == "":
       continue
     var 
       verb = ""
@@ -78,6 +86,10 @@ proc parseScript*(server: CandyServer, script: string): bool =
     case verb
     of "PORT": server.port = path
     of "DB": server.db = open(path, "", "", "")
+    of "DIR": setCurrentDir(path & rest)
+    of "ENV": 
+      putEnv(path, rest.strip())
+      server.debug = getEnv("DEBUG", "") != ""
     of "STATIC": server.staticPaths.add(path)
     of "AUTH": server.passwords.add(path)
     of "STARTUP":
@@ -159,7 +171,7 @@ proc dbFormatArgs(formatstr: SqlQuery, args: Table[string, string]): string =
       add(result, c)
     previous = c
 
-proc jsonRows(server: CandyServer, query: SqlQuery, args: Table[string, string]): JsonNode {.tags: [ReadDbEffect, WriteIOEffect].} =
+proc jsonRows(server: CandyServer, query: SqlQuery, args: Table[string, string]): JsonNode {.tags: [ReadDbEffect, WriteIOEffect, TimeEffect].} =
   var statement: PStmt
   var formatedQuery = dbFormatArgs(query, args)
   server.log(Debug, "sql \"" & formatedQuery & "\"")
@@ -282,7 +294,6 @@ proc redirectAction(server: CandyServer, req: Request, action: Action, content: 
   return false
 
 proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Table[string, string]) {.async, gcsafe.} =
-  echo variables
   var content = Content(kind: Data, data: "{}", content_type: "application/json", variables: variables)
   for action in route.actions:
     try:
@@ -386,6 +397,7 @@ when isMainModule:
       quit()
   else:
     server.log(Info, "No script, just serving current directory")
+    server.staticPaths = @["./"]
 
   proc ctrlcHandler() {.noconv.} =
     quit()
