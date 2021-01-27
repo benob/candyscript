@@ -16,41 +16,52 @@ import terminal
 import uri
 import httpform
 
-type ActionKind = enum
+type ActionKind* = enum
   Auth, Text, Read, SQL, Redirect, Shell, Fetch, View, Json
 
-type Action = object
+type Action* = ref object
   kind: ActionKind
   params: string
 
-type Route = object
+type Route* = ref object
   verb, path: string
   actions: seq[Action]
   components: seq[string]
 
+type CandyServer* = ref object
+  port: string
+  debug: bool
+  verbose: bool
+  db: DbConn
+  mimeResolver: MimeDB
+  staticPaths: seq[string]
+  routes: seq[Route]
+  passwords: seq[string]
+  formParser: AsyncHttpForm 
+
+proc initCandyServer*(verbose = false): CandyServer =
+  CandyServer(port: "8080", debug: existsEnv("DEBUG"), verbose: verbose, mimeResolver: newMimetypes(), routes: @[], passwords: @[], formParser: newAsyncHttpForm(getTempDir(), true), staticPaths: @["./"])
+
 proc `$`(action: Action): string = $action.kind & " " & action.params
 proc `$`(route: Route): string = $route.verb & " " & route.path & "\n" & route.actions.mapIt("  " & $it).join("\n")
 
-var 
-  port = "8080"
-  debug = existsEnv("DEBUG")
-  db: DbConn
-  mimeResolver {.threadvar.}: MimeDB
-  staticPath {.threadvar.}: seq[string]
-  routes {.threadvar.}: seq[Route]
-  passwords {.threadvar.}: seq[string]
-  #formParser {.threadvar.}: AsyncHttpForm 
- 
-stdout.styledWrite(fgBlue, "CandyScript is ready to show off", fgDefault, "\n")
+type LogKind = enum
+  Debug, Info, Warn, Error, None
 
-mimeResolver = newMimetypes()
-routes = newSeq[Route]()
-staticPath = newSeq[string]()
-passwords = newSeq[string]()
-let formParser = newAsyncHttpForm(getTempDir(), true)
+proc log(server: CandyServer, kind: LogKind = LogKind.None, message: string) =
+  let
+    color = case kind
+      of Debug: fgMagenta
+      of Info: fgGreen
+      of Warn: fgYellow
+      of Error: fgRed
+      of None: fgDefault
+    prefix = if kind == LogKind.None: "" else: $kind & ": "
+  if server.verbose or kind == Error or kind == Debug:
+    stdout.styledWrite(color, prefix, fgDefault, message, "\n")
 
-if paramCount() > 0:
-  for line in readFile(paramStr(1)).replace("\\\n", " ").split('\n'):
+proc parseScript*(server: CandyServer, script: string): bool =
+  for line in script.replace("\\\n", " ").split('\n'):
     if line.strip().startswith("#") or line.strip() == "":
       continue
     var 
@@ -65,19 +76,19 @@ if paramCount() > 0:
       else:
         rest &= token
     case verb
-    of "PORT": port = path
-    of "DB": db = open(path, "", "", "")
-    of "STATIC": staticPath.add(path)
-    of "AUTH": passwords.add(path)
+    of "PORT": server.port = path
+    of "DB": server.db = open(path, "", "", "")
+    of "STATIC": server.staticPaths.add(path)
+    of "AUTH": server.passwords.add(path)
     of "STARTUP":
       case path
       of "SHELL": 
         if execCmd(rest) != 0:
           quit(1)
-      of "SQL": db.exec(sql(rest))
+      of "SQL": server.db.exec(sql(rest))
       else: 
-        stdout.styledWrite(fgRed, "[ERROR] ", fgDefault, "Invalid startup action: ", rest, "\n")
-        quit(1)
+        server.log(Error, "Invalid startup action: " & rest)
+        return false
     else:
       var route = Route(verb: verb, path: path, components: path.split('/'))
       for definition in rest.split('|'): 
@@ -100,33 +111,33 @@ if paramCount() > 0:
         of "FETCH": Fetch
         of "VIEW": View
         else:
-          stdout.styledWrite(fgRed, "[ERROR] ", fgDefault, "Invalid action kind: ", kind, "\n")
-          quit()
+          server.log(Error, "Invalid action kind: " & kind)
+          return false
         route.actions.add(Action(kind: actionKind, params: params.strip()))
-      routes.add(route)
+      server.routes.add(route)
 
-  stdout.styledWrite(fgYellow, "[INFO] ", fgDefault, "Loaded ", $routes.len, " routes\n")
-  if debug:
-    for route in routes:
+  server.log(Info, "Loaded " & $server.routes.len & " routes")
+  if server.debug:
+    for route in server.routes:
       echo route
-else:
-  stdout.styledWrite(fgYellow, "[INFO] ", fgDefault, "No script, just serving current directory\n")
-  staticPath = @["./"]
+  return true
+
+proc loadScript*(server: CandyServer, filename: string): bool = server.parseScript(readFile(filename))
 
 proc replaceVariables(text: string, variables: Table[string, string]): string =
   multiReplace(text, toSeq(variables.pairs).mapIt(('{' & it[0] & '}', it[1])))
 
-proc sendFile(req: Request, filename: string) {.async, gcsafe.} =
+proc sendFile(server: CandyServer, req: Request, filename: string) {.async, gcsafe.} =
   try:
     let content = readFile(filename)
     let ext = filename.splitFile().ext
-    let mime = mimeResolver.getMimetype(ext)
+    let mime = server.mimeResolver.getMimetype(ext)
     let headers = newHttpHeaders([("Content-Type", mime)])
     await req.respond(Http200, content, headers)
-    if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "send file \"", filename, "\"\n")
+    server.log(Debug, "send file \"" & filename & "\"")
   except:
     let e = getCurrentException()
-    stdout.styledWrite(fgRed, "[ERROR] <<<", fgDefault, e.msg.split('\n')[0], "\n")
+    server.log(Error, e.msg.split('\n')[0])
     await req.respond(Http404, "Not found")
 
 proc dbFormatArgs(formatstr: SqlQuery, args: Table[string, string]): string =
@@ -148,12 +159,12 @@ proc dbFormatArgs(formatstr: SqlQuery, args: Table[string, string]): string =
       add(result, c)
     previous = c
 
-proc jsonRows*(db: DbConn, query: SqlQuery, args: Table[string, string]): JsonNode {.tags: [ReadDbEffect, WriteIOEffect].} =
+proc jsonRows(server: CandyServer, query: SqlQuery, args: Table[string, string]): JsonNode {.tags: [ReadDbEffect, WriteIOEffect].} =
   var statement: PStmt
   var formatedQuery = dbFormatArgs(query, args)
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "sql \"", formatedQuery, "\"\n")
-  if prepare_v2(db, formatedQuery, formatedQuery.len.cint, statement, nil) != SQLITE_OK: 
-    dbError(db)
+  server.log(Debug, "sql \"" & formatedQuery & "\"")
+  if prepare_v2(server.db, formatedQuery, formatedQuery.len.cint, statement, nil) != SQLITE_OK: 
+    dbError(server.db)
   var numColumns = column_count(statement)
   result = newJArray()
   try:
@@ -168,7 +179,7 @@ proc jsonRows*(db: DbConn, query: SqlQuery, args: Table[string, string]): JsonNo
           node.add($name, newJString($value))
       result.add(node)
   finally:
-    if finalize(statement) != SQLITE_OK: dbError(db)
+    if finalize(statement) != SQLITE_OK: dbError(server.db)
 
 type ContentKind = enum
   Data, Node
@@ -180,7 +191,7 @@ type Content = ref object
   content_type: string
   variables: Table[string, string]
 
-proc authAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc authAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   if not req.headers.hasKey("Authorization"):
     let realm = if action.params == "": "Authentication required" else: replaceVariables(action.params, content.variables).replace('"', '\'')
     let headers = newHttpHeaders([("WWW-Authenticate", "Basic realm=\"" & realm & "\", charset=\"UTF-8\"") ])
@@ -188,47 +199,47 @@ proc authAction(req: Request, action: Action, content: Content): Future[bool] {.
     return false
   else:
     let token = base64.decode(req.headers["Authorization"].split()[^1])
-    if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "auth \"", token, "\"\n")
-    for password in passwords:
+    server.log(Debug, "auth \"" & token & "\"")
+    for password in server.passwords:
       if token == password:
         return true
     await req.respond(Http403, "Access denied")
     return false
 
-proc textAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc textAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   content.data = replaceVariables(action.params, content.variables)
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "text \"", content.data, "\"\n")
+  server.log(Debug, "text \"" & content.data & "\"")
   content.content_type = "text/plain"
   content.kind = Data
   return true
 
-proc formatValues(variables: seq[(string, string)]): seq[(string, string)] =
-  for (name, value) in variables:
-    result.add((name, '"' & value.replace("\"", "\\\"") & '"'))
+#proc formatValues(variables: seq[(string, string)]): seq[(string, string)] =
+#  for (name, value) in variables:
+#    result.add((name, '"' & value.replace("\"", "\\\"") & '"'))
 
-proc jsonAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc jsonAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   let text = replaceVariables(action.params, content.variables)
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "json \"", text, "\"\n")
+  server.log(Debug, "json \"" & text & "\"")
   content.node = parseJson(text)
   content.content_type = "application/json"
   content.kind = Node
   return true
 
-proc readAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc readAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   let filename = replaceVariables(action.params, content.variables).replace("/../", "/")
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "read file \"", filename, "\"\n")
+  server.log(Debug, "read file \"" & filename & "\"")
   try:
     content.data = readFile(filename)
   except:
     await req.respond(Http404, "Not found")
     return false
-  content.content_type = mimeResolver.getMimetype(filename.splitFile().ext)
+  content.content_type = server.mimeResolver.getMimetype(filename.splitFile().ext)
   return true
 
-proc viewAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc viewAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   let filename = replaceVariables(action.params, content.variables).replace("/../", "/")
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "render view \"", filename, "\"\n")
-  content.content_type = mimeResolver.getMimetype(filename.splitFile().ext)
+  server.log(Debug, "render view \"" & filename & "\"")
+  content.content_type = server.mimeResolver.getMimetype(filename.splitFile().ext)
   let view = readFile(filename)
   if content.kind == Data:
     content.node = parseJson(content.data)
@@ -239,52 +250,52 @@ proc viewAction(req: Request, action: Action, content: Content): Future[bool] {.
   content.kind = Data
   return true
   
-proc sqlAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
-  content.node = db.jsonRows(sql(action.params), content.variables)
+proc sqlAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+  content.node = server.jsonRows(sql(action.params), content.variables)
   content.kind = Node
   content.content_type = "application/json"
-  content.variables["{last_insert_rowid}"] = $db.last_insert_rowid
+  content.variables["{last_insert_rowid}"] = $server.db.last_insert_rowid
   return true
 
-proc shellAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "shell \"", action.params, "\"\n")
+proc shellAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+  server.log(Debug, "shell \"" & action.params & "\"")
   content.data = execCmdEx(action.params).output
   content.kind = Data
   content.content_type = "text/plain"
   return true
 
-proc fetchAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc fetchAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   let client = newAsyncHttpClient()
   let url = replaceVariables(action.params, content.variables)
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "fetch \"", url, "\"\n")
+  server.log(Debug, "fetch \"" & url & "\"")
   let response = await client.get(url)
   content.data = await response.body
   content.kind = Data
   content.content_type = $response.headers["Content-Type"]
   return true
 
-proc redirectAction(req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+proc redirectAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   let location = replaceVariables(action.params, content.variables)
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "redirect \"", location, "\"\n")
+  server.log(Debug, "redirect \"" & location & "\"")
   let headers = newHttpHeaders([("Location", location)])
   await req.respond(Http301, "Moved permanently", headers)
   return false
 
-proc handleRoute(req: Request, route: Route, variables: Table[string, string]) {.async, gcsafe.} =
+proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Table[string, string]) {.async, gcsafe.} =
   echo variables
   var content = Content(kind: Data, data: "{}", content_type: "application/json", variables: variables)
   for action in route.actions:
     try:
       let proceed = case action.kind
-      of Auth: await req.authAction(action, content)
-      of Text: await req.textAction(action, content)
-      of Json: await req.jsonAction(action, content)
-      of Read: await req.readAction(action, content)
-      of SQL: await req.sqlAction(action, content)
-      of Shell: await req.shellAction(action, content)
-      of Fetch: await req.fetchAction(action, content)
-      of View: await req.viewAction(action, content)
-      of Redirect: await req.redirectAction(action, content)
+      of Auth: await server.authAction(req, action, content)
+      of Text: await server.textAction(req, action, content)
+      of Json: await server.jsonAction(req, action, content)
+      of Read: await server.readAction(req, action, content)
+      of SQL: await server.sqlAction(req, action, content)
+      of Shell: await server.shellAction(req, action, content)
+      of Fetch: await server.fetchAction(req, action, content)
+      of View: await server.viewAction(req, action, content)
+      of Redirect: await server.redirectAction(req, action, content)
       if not proceed:
         return
     except:
@@ -309,22 +320,23 @@ proc parseQuery(query: string): Table[string, string] =
     if name != "":
       result[name] = value
 
-proc parseBody(req: Request): Future[Table[string, string]] {.async, gcsafe.} =
+proc parseBody(formParser: AsyncHttpForm, req: Request): Future[Table[string, string]] {.async, gcsafe.} =
   if req.headers.hasKey("Content-Type"):
     var (fields, files) = await formParser.parseAsync(req.headers["Content-Type"], req.body)
+    discard files
     for name, value in fields:
       result[$name] = value.str
 
-proc handler(req: Request) {.async, gcsafe.} =
+proc handleRequest*(server: CandyServer, req: Request) {.async, gcsafe.} =
   let 
     verb = $req.reqMethod
     path = decodeUrl(req.url.path)
     components = path.split('/')
 
-  stdout.styledWrite(fgGreen, verb, fgDefault, " ", path, "\n")
+  server.log(Info, verb & " " & path)
 
   var 
-    bodyParams = await req.parseBody()
+    bodyParams = await server.formParser.parseBody(req)
     queryParams = parseQuery(decodeUrl(req.url.query))
   let page = queryParams.getOrDefault("page", "0").parseInt
   let limit = queryParams.getOrDefault("limit", "10").parseInt
@@ -333,7 +345,7 @@ proc handler(req: Request) {.async, gcsafe.} =
   queryParams["page"] = $page
   queryParams["limit"] = $limit
 
-  for route in routes:
+  for route in server.routes:
     if route.components.len == components.len and route.verb == verb:
       var 
         variables = initTable[string, string]()
@@ -353,22 +365,36 @@ proc handler(req: Request) {.async, gcsafe.} =
           variables[key] = value
         for key, value in queryParams.pairs:
           variables[key] = value
-        await req.handleRoute(route, variables)
+        await server.handleRoute(req, route, variables)
         return
-  for directory in staticPath:
+  for directory in server.staticPaths:
     let filename = joinPath(getCurrentDir(), directory, "/" & path.replace("/../", "/"))
     if fileExists(filename):
-      if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "static file \"", filename, "\"\n")
-      await req.sendFile(filename)
+      server.log(Debug, "static file \"" & filename & "\"")
+      await server.sendFile(req, filename)
       return
-  if debug: stdout.styledWrite(fgMagenta, "[DEBUG] ", fgDefault, "not found\n")
+  server.log(Debug, "not found")
   await req.respond(Http404, "Not found")
 
-stdout.styledWrite(fgYellow, "[START] ", fgDefault, "Listening to requests on port: ", port, "\n")
 
-proc ctrlcHandler() {.noconv.} =
-  quit()
-setControlCHook(ctrlcHandler)
+when isMainModule:
+  var server {.threadvar.}: CandyServer
+  server = initCandyServer(verbose=true)
+  stdout.styledWrite(fgBlue, "CandyScript is ready to show off", fgDefault, "\n")
+  if paramCount() >= 1:
+    if not server.loadScript(paramStr(1)):
+      quit()
+  else:
+    server.log(Info, "No script, just serving current directory")
 
-var server = newAsyncHttpServer()
-waitFor server.serve(Port(port.parseInt()), handler)
+  proc ctrlcHandler() {.noconv.} =
+    quit()
+  setControlCHook(ctrlcHandler)
+
+  proc handler(req: Request) {.async, gcsafe.} =
+    await server.handleRequest(req)
+
+  server.log(Warn, "Listening on port: " & server.port)
+  var httpServer = newAsyncHttpServer()
+  waitFor httpServer.serve(Port(server.port.parseInt()), handler)
+

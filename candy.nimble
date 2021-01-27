@@ -7,4 +7,4 @@ bin = @["candy"]
 
 requires "nim >= 1.0.0"
 requires "mustache >= 0.3.2"
-requires "httpform >= 0.2.0"
+requires "https://github.com/benob/httpform?branch@#refactoring2019"
