@@ -3,8 +3,9 @@ author      = "Benoit Favre"
 description = "Server for candy script web services"
 license     = "MIT"
 
-bin = @["candy"]
+bin = @["candyscript"]
 
 requires "nim >= 1.0.0"
 requires "mustache >= 0.3.2"
 requires "https://github.com/benob/httpform?branch@#refactoring2019"
+requires "nimcrypto"

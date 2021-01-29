@@ -1,27 +1,30 @@
 # CandyScript
 
 CandyScript is a lightweight yet superfast language for forging small web servers and RestAPIs.
-This flavor is inspired from [littledivy/candyscript](https://github.com/littledivy/candyscript) but does a lot more.
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
+It is inspired by [littledivy/candyscript](https://github.com/littledivy/candyscript) but does a lot more.
 
 ## Features
 
 * Line-by-line parser
-* One of the fastest web server powered by Nim's `asynchttpserver`
+* Relatively fast thanks to Nim's `asynchttpserver`
 * Short and efficient
-* < 400 lines of Nim code!
 * A single binary for everything
 * Interface with a SQLite database
 * Fetch external URLs
 * [Mustache](https://github.com/soasme/nim-mustache) templates
 * Get data from command lines
-* Basic variable replacement system
-* Authentication
+* Variable substitution system
+* Authentication with http basic
+* Sessions (though probably not that secure)
 
 ## TODO
 
-* [ ] Add session handling
+* [ ] Clean up the mess with variable substitution
+* [ ] Easily grab data from FETCH requests
+* [ ] Tests
+* [ ] More examples
 * [ ] Use `httpbeast` instead of `asynchttpserver`
+* [ ] Make it robust, fast and secure
 
 ## Example
 
@@ -32,16 +35,16 @@ This flavor is inspired from [littledivy/candyscript](https://github.com/littled
 GET / Hello, World!
 ```
 
-For a more advanced showcase, see [the examples](examples/server.candy)
+For a more advanced usage, see [the examples](examples/).
 
 ## Building from source
 
-Use the [Nim compiler](https://nim-lang.org) to compile source code.
+Use the [Nim compiler](https://nim-lang.org) to build source code.
 
 This code will run your candyscript server.
 ```bash
 nimble build
-./candy your_script.candy
+./candyscript your_script.candy
 ```
 
 ## Contributing

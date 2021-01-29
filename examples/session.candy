@@ -1,0 +1,3 @@
+GET /write/{name} SESSION name={name} | TEXT written
+GET /read SESSION name | TEXT read {name}
+GET /logout SESSION name= | TEXT killed session

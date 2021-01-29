@@ -1,20 +1,18 @@
 # TODO: 
-# modify env
 # use env as variables
-# add a session system
 # handle file uploads
+# check that variables are valid identifiers
 
+# directives are executed in order
 PORT 8080
-# directives are executed when in order
-# DIR change current directory (do it before loading the db)
-DIR examples/
 
-# path to sqlite3 database
-DB user.db
+# DIR changes the current directory
+DIR examples/
 
 # setup static file dirs relative to current directory
 # files are served as if from /
 STATIC public
+STATIC img
 
 # executed at startup
 STARTUP SHELL uname -a
@@ -23,22 +21,18 @@ STARTUP SQL create table if not exists users (id integer primary key, name text)
 # ENV set environment variable
 ENV DEBUG 1
 
-# a route is an HTTP verb, followed by a PATH definition and a set of actions separated by "|"
+# A route is an HTTP verb, followed by a PATH definition and a set of actions separated by "|"
 # variables are defined by {identifier} and replaced in the action parameters
-# variables can be set in PATH elements or as query parameters
+# variables can be set in PATH elements, as query or post parameters 
 
-# TEXT returns text
+# TEXT returns text after substitution
 GET / TEXT hello, care for some candy? 
 GET /hi/{name} TEXT hi {name}!
-
-# variables are extracted in order:
-# 1) from request path; i.e. curl -X POST localhost:8080/post/zzz
-# 2) from request body; i.e. curl -F a=zzz b=yyy localhost:8080/post/ttt
-# 3) from request query; i.e. curl -X POST 'localhost:8080/post/nnn?a=zzz&b=yyy'
 POST /post/{a} TEXT recieved a="{a}" b="{b}"
 
 # READ returns the content of an uncached file
 # /../ is replaced with /
+# TODO: prevent substituting a variable at start of path
 GET /loadavg READ /proc/loadavg
 GET /ex/{fn} READ ./{fn}
 
@@ -46,6 +40,9 @@ GET /ex/{fn} READ ./{fn}
 # can be piped to a mustache template where json data is carried in {{data}} and variables are in {{vars}}
 GET /json JSON {"a": 1, "b": 2}
 GET /json JSON {"a": 1, "b": 2} | VIEW views/json.html
+
+# DB load sqlite3 database
+DB user.db
 
 # SQL returns json representation of an sqlite query
 GET /user/{id} SQL select * from users where id = {id}
@@ -60,6 +57,8 @@ GET /users SQL select * from users | VIEW views/user.html
 GET /weather/{city} FETCH https://wttr.in/{city}?format=j1
 GET /weather.png FETCH https://wttr.in/.png
 GET /beers FETCH https://api.punkapi.com/v2/beers | VIEW views/beers.html
+# FETCH ideas
+# use with a simple way of grepping data in html (css selectors?, result exposed as json or in variable)
 
 # SHELL stdout + stderr from shell command, no variable interpolation
 GET /date SHELL date
@@ -74,18 +73,21 @@ AUTH user:password
 # AUTH as an action requires a valid user:password pair to continue
 GET /restricted AUTH | TEXT You can read this secret
 
-# ideas for implementing AUTH
+# TODO: implement more auth mecanisms
 #AUTH SQL select id from user where token = {token}
 #AUTH FILE tokens.txt
 #AUTH TOKEN 0a1927ajsgdhakjs7912y3ssj
 #AUTH TYPE basic
 
-# ideas for implementing sessions
-#POST /login SQL select id from users where name={name} and password={password} | SESSION user_id | REDIRECT /
-#GET /session TEXT Hi {SESSION:user_id}
+# KEY sets a key to sign session cookies (at least 16 hex bytes; defaults to a random key)
+KEY 0123456789abcdef0123456789abcdef
 
-# SESSION|verb: require session, variables set in session are available
-# SESSION: clear session
-#GET /login/{name}/{password} SESSION select id as user_id from user where name = {name} and password = {password}
-#GET /logout SESSION
+# SESSION sets or reads variables from a signed session cookie
+GET /write/{name} SESSION name={name} | TEXT written
+# if a variable is not in the session or the session is invalid, error 401 is returned
+GET /read SESSION name | TEXT read {name}
+GET /logout SESSION name= | TEXT killed session
+
+#TODO: put sql result in variables so that it can be set in sessions
+#POST /login SESSION select id as user_id from user where name = {name} and password = {password} | SESSION user_id={user_id}
 

@@ -1,0 +1,25 @@
+# simple blog
+
+# TODO: untested
+PORT 8080
+STATIC public
+DB blog.db
+AUTH user:password
+STARTUP SQL create table if not exists blog (title text, author text, body text, date datetime)
+
+# {offset} is derived from {limit} and {page} which default to 10 and 0
+# {nextPage} is always set to {page} + 1
+GET / SQL select rowid as id, * from blog order by date desc limit {limit} offset {offset} \
+  | VIEW blog/posts.html
+
+GET /register READ social/register.html
+
+POST /login SQL select rowid from users where user = {user} and password = {password} | SESSION user={lastrow} | REDIRECT /
+POST /register SQL insert into users (user, password) values ({user}, {password}) | REDIRECT /
+POST /subscribe SESSION user | SQL insert into subscriptions (user, feed) values ({user}, {feed}) | REDIRECT /
+POST /unsubscribe SESSION user | SQL delete from subscriptions where user={user} and feed={feed} | REDIRECT /
+POST /say/ SESSION user | SQL insert into messages (user, text, date) values ({user}, {text}, datetime('now') | REDIRECT /
+
+GET /feed SQL select * from messages inner join subscriptions on messages.user = subscriptions.feed order by date desc limit 30
+GET / SQL select * from messages order by date desc limit 30
+

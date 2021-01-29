@@ -1,7 +1,6 @@
 # simple blog
 
 PORT 8080
-STATIC public
 DB blog.db
 AUTH user:password
 STARTUP SQL create table if not exists blog (title text, author text, body text, date datetime)

@@ -2,15 +2,18 @@ import asyncdispatch
 import asynchttpserver
 import base64
 import cgi
+import cookies
 import db_sqlite
 import httpClient
 import json
 import mimetypes
+import nimcrypto
 import os
 import osproc
 import sequtils
 import sqlite3
 import strutils
+import strtabs
 import tables
 import terminal
 import uri
@@ -19,7 +22,7 @@ import mustache
 import httpform
 
 type ActionKind* = enum
-  Auth, Text, Read, SQL, Redirect, Shell, Fetch, View, Json
+  Auth, Text, Read, SQL, Redirect, Shell, Fetch, View, Json, Session
 
 type Action* = ref object
   kind: ActionKind
@@ -40,28 +43,30 @@ type CandyServer* = ref object
   routes: seq[Route]
   passwords: seq[string]
   formParser: AsyncHttpForm 
+  signatureKey: string
 
 proc initCandyServer*(verbose = false): CandyServer =
-  CandyServer(port: "8080", debug: getEnv("DEBUG") != "", verbose: verbose, mimeResolver: newMimetypes(), routes: @[], passwords: @[], formParser: newAsyncHttpForm(getTempDir(), true), staticPaths: @[])
+  var bytes = newString(16)
+  discard randomBytes(bytes)
+  result = CandyServer(port: "8080", debug: getEnv("DEBUG") != "", verbose: verbose, mimeResolver: newMimetypes(), routes: @[], passwords: @[], formParser: newAsyncHttpForm(getTempDir(), true), staticPaths: @[], signatureKey: bytes)
 
-proc `$`(action: Action): string = $action.kind & " " & action.params
+proc `$`(action: Action): string = toUpperAscii($action.kind) & " " & action.params
 proc `$`(route: Route): string = $route.verb & " " & route.path & "\n" & route.actions.mapIt("  " & $it).join("\n")
 
 type LogKind = enum
   Debug, Info, Warn, Error, None
 
-proc log(server: CandyServer, kind: LogKind = LogKind.None, message: string) =
-  let
-    color = case kind
-      of Debug: fgMagenta
+template log(server: CandyServer, kind: LogKind = LogKind.None, message: string) =
+  if kind == Error:
+    stdout.styledWrite(fgRed, $kind & ": ", fgDefault, message, "\n")
+  elif kind == Debug and server.debug:
+    stdout.styledWrite(fgMagenta, $kind & ": ", fgDefault, message, "\n")
+  elif server.verbose:
+    let color = case kind
       of Info: fgGreen
       of Warn: fgYellow
-      of Error: fgRed
-      of None: fgDefault
-    prefix = if kind == LogKind.None: "" else: $kind & ": "
-  if kind == Debug and not server.debug:
-    return
-  if server.verbose or kind == Error:
+      else: fgDefault
+    let prefix = if kind == LogKind.None: "" else: $kind & ": "
     stdout.styledWrite(color, prefix, fgDefault, message, "\n")
 
 proc parseScript*(server: CandyServer, script: string): bool =
@@ -84,20 +89,39 @@ proc parseScript*(server: CandyServer, script: string): bool =
       else:
         rest &= token
     case verb
-    of "PORT": server.port = path
-    of "DB": server.db = open(path, "", "", "")
-    of "DIR": setCurrentDir(path & rest)
+    of "PORT": 
+      server.log(Debug, "set port \"" & path & "\"")
+      server.port = path
+    of "DB": 
+      server.log(Debug, "load db \"" & path & "\"")
+      server.db = open(path, "", "", "")
+    of "DIR": 
+      server.log(Debug, "change directory \"" & path & rest & "\"")
+      setCurrentDir(path & rest)
     of "ENV": 
+      server.log(Debug, "set environment " & path & " = \"" & rest.strip() & "\"")
       putEnv(path, rest.strip())
       server.debug = getEnv("DEBUG", "") != ""
-    of "STATIC": server.staticPaths.add(path)
-    of "AUTH": server.passwords.add(path)
+    of "STATIC": 
+      server.log(Debug, "add static path \"" & path & "\"")
+      server.staticPaths.add(path)
+    of "AUTH": 
+      server.log(Debug, "add authentication credentials \"" & path & "\"")
+      server.passwords.add(path)
+    of "KEY": 
+      server.log(Debug, "set signature key \"" & path & "\"")
+      server.signatureKey = parseHexStr(path)
+      assert server.signatureKey.len >= 16
     of "STARTUP":
       case path
       of "SHELL": 
-        if execCmd(rest) != 0:
-          quit(1)
-      of "SQL": server.db.exec(sql(rest))
+        server.log(Debug, "execute shell command \"" & rest.strip() & "\"")
+        if execCmd(rest.strip()) != 0:
+          server.log(Error, "command returned non-zero exit code \"" & rest.strip() & "\"")
+          return false
+      of "SQL": 
+        server.log(Debug, "execute sql \"" & rest.strip() & "\"")
+        server.db.exec(sql(rest.strip()))
       else: 
         server.log(Error, "Invalid startup action: " & rest)
         return false
@@ -122,6 +146,7 @@ proc parseScript*(server: CandyServer, script: string): bool =
         of "SHELL": Shell
         of "FETCH": Fetch
         of "VIEW": View
+        of "SESSION": Session
         else:
           server.log(Error, "Invalid action kind: " & kind)
           return false
@@ -129,15 +154,33 @@ proc parseScript*(server: CandyServer, script: string): bool =
       server.routes.add(route)
 
   server.log(Info, "Loaded " & $server.routes.len & " routes")
-  if server.debug:
-    for route in server.routes:
-      echo route
+  for route in server.routes:
+    server.log(Debug, "route " & $route)
   return true
 
 proc loadScript*(server: CandyServer, filename: string): bool = server.parseScript(readFile(filename))
 
+#proc replaceVariables(text: string, variables: Table[string, string]): string =
+#  multiReplace(text, toSeq(variables.pairs).mapIt(('{' & it[0] & '}', it[1])))
+
 proc replaceVariables(text: string, variables: Table[string, string]): string =
-  multiReplace(text, toSeq(variables.pairs).mapIt(('{' & it[0] & '}', it[1])))
+  result = ""
+  var 
+    identifier = ""
+    inIdentifier = false
+    previous = '\0'
+  for c in items(text):
+    if previous != '\\' and c == '{':
+      inIdentifier = true
+      identifier = ""
+    elif previous != '\\' and c == '}' and inIdentifier:
+      inIdentifier = false
+      add(result, variables[identifier])
+    elif inIdentifier:
+      add(identifier, c)
+    else:
+      add(result, c)
+    previous = c
 
 proc sendFile(server: CandyServer, req: Request, filename: string) {.async, gcsafe.} =
   try:
@@ -202,12 +245,13 @@ type Content = ref object
   data: string
   content_type: string
   variables: Table[string, string]
+  session: Table[string, string]
 
 proc authAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
   if not req.headers.hasKey("Authorization"):
     let realm = if action.params == "": "Authentication required" else: replaceVariables(action.params, content.variables).replace('"', '\'')
     let headers = newHttpHeaders([("WWW-Authenticate", "Basic realm=\"" & realm & "\", charset=\"UTF-8\"") ])
-    await req.respond(Http401, "Authentication required", headers)
+    await req.respond(Http401, "Unauthorized", headers)
     return false
   else:
     let token = base64.decode(req.headers["Authorization"].split()[^1])
@@ -293,8 +337,54 @@ proc redirectAction(server: CandyServer, req: Request, action: Action, content: 
   await req.respond(Http301, "Moved permanently", headers)
   return false
 
+proc sessionAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+  for definition in action.params.split(','): 
+    let found = definition.find('=')
+    if found >= 0:
+      let name = definition[0..found - 1].strip()
+      let value = definition[found + 1..^1].strip()
+      if value == "":
+        content.session.del(name)
+      else:
+        content.session[name] = replaceVariables(value, content.variables)
+    else:
+      let name = definition.strip()
+      if content.session.hasKey(name):
+        content.variables[name] = content.session[name]
+      else:
+        await req.respond(Http401, "Invalid session")
+        return false
+    return true
+
+proc readSession(server: CandyServer, req: Request, content: Content): bool =
+  content.session = initTable[string, string]()
+  try:
+    let cookies = parseCookies($req.headers["Cookie"])
+    let text = cookies["session"]
+    let signature = $sha256.hmac(server.signatureKey, text)
+    if signature != cookies["session.sig"]:
+      return false
+    let node = parseJson(base64.decode(text))
+    for key, value in node.pairs:
+      content.session[key] = value.str
+    return true
+  except:
+    return false
+
+proc writeSession(server: CandyServer, content: Content): seq[string] =
+  if content.session.len > 0:
+    let text = base64.encode($(%* content.session))
+    let signature = $sha256.hmac(server.signatureKey, text)
+    return @["session=" & text & "; HttpOnly; Path=/; SameSite=Strict; Max-Age=259200;",
+      "session.sig=" & signature & "; HttpOnly; Path=/; SameSite=Strict; Max-Age=259200;"]
+  else:
+    return @["session=removed; HttpOnly; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
+      "session.sig=removed; HttpOnly; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;"]
+
 proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Table[string, string]) {.async, gcsafe.} =
   var content = Content(kind: Data, data: "{}", content_type: "application/json", variables: variables)
+  discard server.readSession(req, content)
+  server.log(Debug, "session = " & $content.session)
   for action in route.actions:
     try:
       let proceed = case action.kind
@@ -306,6 +396,7 @@ proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Tab
       of Shell: await server.shellAction(req, action, content)
       of Fetch: await server.fetchAction(req, action, content)
       of View: await server.viewAction(req, action, content)
+      of Session: await server.sessionAction(req, action, content)
       of Redirect: await server.redirectAction(req, action, content)
       if not proceed:
         return
@@ -317,6 +408,7 @@ proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Tab
   if content.kind == Node:
     content.data = $content.node
   let headers = newHttpHeaders([("Content-Type", content.content_type)])
+  headers["Set-Cookie"] = server.writeSession(content)
   await req.respond(Http200, content.data, headers)
 
 proc parseQuery(query: string): Table[string, string] =
