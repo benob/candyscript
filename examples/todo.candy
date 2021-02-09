@@ -1,0 +1,13 @@
+# simple todo list
+
+DB todo.db
+STARTUP SQL create table if not exists todo (text TEXT, due DATETIME, pending BOOLEAN)
+STATIC /public
+
+GET / READ public/todo.html
+
+GET /pending SQL select rowid as id, * from todo where pending == true order by due asc
+GET /all SQL select rowid as id, * from todo order by due asc
+POST /done SQL update todo set pending = false where rowid={id}
+POST /undone SQL update todo set pending = true where rowid={id}
+POST /add SQL insert into todo (text, due, pending) values ({text}, {due}, true)

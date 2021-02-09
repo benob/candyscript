@@ -6,6 +6,7 @@ import cookies
 import db_sqlite
 import httpClient
 import json
+import deques
 import mimetypes
 import nimcrypto
 import os
@@ -22,7 +23,7 @@ import mustache
 import httpform
 
 type ActionKind* = enum
-  Auth, Text, Read, SQL, Redirect, Shell, Fetch, View, Json, Session
+  Auth, Text, Html, Json, Read, SQL, Redirect, Shell, Fetch, View, Session, Chain, ContentType
 
 type Action* = ref object
   kind: ActionKind
@@ -59,8 +60,9 @@ type LogKind = enum
 template log(server: CandyServer, kind: LogKind = LogKind.None, message: string) =
   if kind == Error:
     stdout.styledWrite(fgRed, $kind & ": ", fgDefault, message, "\n")
-  elif kind == Debug and server.debug:
-    stdout.styledWrite(fgMagenta, $kind & ": ", fgDefault, message, "\n")
+  elif kind == Debug:
+    if server.debug:
+      stdout.styledWrite(fgMagenta, $kind & ": ", fgDefault, message, "\n")
   elif server.verbose:
     let color = case kind
       of Info: fgGreen
@@ -140,6 +142,7 @@ proc parseScript*(server: CandyServer, script: string): bool =
         of "AUTH": Auth
         of "TEXT": Text
         of "JSON": Json
+        of "HTML": Html
         of "READ": Read
         of "SQL": SQL
         of "REDIRECT": Redirect
@@ -147,6 +150,8 @@ proc parseScript*(server: CandyServer, script: string): bool =
         of "FETCH": Fetch
         of "VIEW": View
         of "SESSION": Session
+        of "CHAIN": Chain
+        of "TYPE": ContentType
         else:
           server.log(Error, "Invalid action kind: " & kind)
           return false
@@ -163,7 +168,10 @@ proc loadScript*(server: CandyServer, filename: string): bool = server.parseScri
 #proc replaceVariables(text: string, variables: Table[string, string]): string =
 #  multiReplace(text, toSeq(variables.pairs).mapIt(('{' & it[0] & '}', it[1])))
 
-proc replaceVariables(text: string, variables: Table[string, string]): string =
+type Sanitize = enum
+  NoSanitize, HtmlEntities, PathComponent, Quote
+    
+proc replaceVariables(text: string, variables: Table[string, string], sanitize = NoSanitize): string =
   result = ""
   var 
     identifier = ""
@@ -175,7 +183,13 @@ proc replaceVariables(text: string, variables: Table[string, string]): string =
       identifier = ""
     elif previous != '\\' and c == '}' and inIdentifier:
       inIdentifier = false
-      add(result, variables[identifier])
+      let value = variables[identifier]
+      let sanitized = case sanitize
+      of NoSanitize: value
+      of HtmlEntities: value.multiReplace([("<", "&lt;"), (">", "&gt;"), ("&", "&amp;")])
+      of PathComponent: value.replace("/", "")
+      of Quote: '"' & value.replace("\"", "\\\"") & '"'
+      add(result, sanitized)
     elif inIdentifier:
       add(identifier, c)
     else:
@@ -269,6 +283,13 @@ proc textAction(server: CandyServer, req: Request, action: Action, content: Cont
   content.kind = Data
   return true
 
+proc htmlAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+  content.data = replaceVariables(action.params, content.variables, HtmlEntities)
+  server.log(Debug, "text \"" & content.data & "\"")
+  content.content_type = "text/html"
+  content.kind = Data
+  return true
+
 #proc formatValues(variables: seq[(string, string)]): seq[(string, string)] =
 #  for (name, value) in variables:
 #    result.add((name, '"' & value.replace("\"", "\\\"") & '"'))
@@ -310,7 +331,7 @@ proc sqlAction(server: CandyServer, req: Request, action: Action, content: Conte
   content.node = server.jsonRows(sql(action.params), content.variables)
   content.kind = Node
   content.content_type = "application/json"
-  content.variables["{last_insert_rowid}"] = $server.db.last_insert_rowid
+  content.variables["last_insert_rowid"] = $server.db.last_insert_rowid
   return true
 
 proc shellAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
@@ -335,6 +356,12 @@ proc redirectAction(server: CandyServer, req: Request, action: Action, content: 
   server.log(Debug, "redirect \"" & location & "\"")
   let headers = newHttpHeaders([("Location", location)])
   await req.respond(Http301, "Moved permanently", headers)
+  return false
+
+proc contentTypeAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
+  let contentType = replaceVariables(action.params, content.variables) # is this secure?
+  server.log(Debug, "content-type \"" & contentType & "\"")
+  content.content_type = contentType
   return false
 
 proc sessionAction(server: CandyServer, req: Request, action: Action, content: Content): Future[bool] {.async, gcsafe.} =
@@ -375,22 +402,22 @@ proc writeSession(server: CandyServer, content: Content): seq[string] =
   if content.session.len > 0:
     let text = base64.encode($(%* content.session))
     let signature = $sha256.hmac(server.signatureKey, text)
-    return @["session=" & text & "; HttpOnly; Path=/; SameSite=Strict; Max-Age=259200;",
-      "session.sig=" & signature & "; HttpOnly; Path=/; SameSite=Strict; Max-Age=259200;"]
+    return @["session=" & text & "; HttpOnly; SameSite=Strict; Path=/; Max-Age=259200;",
+      "session.sig=" & signature & "; HttpOnly; SameSite=Strict; Path=/; Max-Age=259200;"]
   else:
-    return @["session=removed; HttpOnly; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
-      "session.sig=removed; HttpOnly; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;"]
+    return @["session=; HttpOnly; SameSite=Strict; Path=/; ",
+      "session.sig=; HttpOnly; SameSite=Strict; Path=/;"]
+    #return @["session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0;",
+    #  "session.sig=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0;"]
 
-proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Table[string, string]) {.async, gcsafe.} =
-  var content = Content(kind: Data, data: "{}", content_type: "application/json", variables: variables)
-  discard server.readSession(req, content)
-  server.log(Debug, "session = " & $content.session)
+proc handleRoute(server: CandyServer, req: Request, route: Route, content: Content): Future[tuple[verb: string, path: string]] {.async, gcsafe.} =
   for action in route.actions:
     try:
       let proceed = case action.kind
       of Auth: await server.authAction(req, action, content)
       of Text: await server.textAction(req, action, content)
       of Json: await server.jsonAction(req, action, content)
+      of Html: await server.htmlAction(req, action, content)
       of Read: await server.readAction(req, action, content)
       of SQL: await server.sqlAction(req, action, content)
       of Shell: await server.shellAction(req, action, content)
@@ -398,18 +425,22 @@ proc handleRoute(server: CandyServer, req: Request, route: Route, variables: Tab
       of View: await server.viewAction(req, action, content)
       of Session: await server.sessionAction(req, action, content)
       of Redirect: await server.redirectAction(req, action, content)
+      of ContentType: await server.contentTypeAction(req, action, content)
+      of Chain: 
+        let target = replaceVariables(action.params, content.variables)
+        server.log(Debug, "chain \"" & target & "\"")
+        let found = target.find(' ')
+        return (target[0 .. found - 1], target[found + 1 .. ^1])
       if not proceed:
-        return
+        return ("", "")
     except:
       stdout.styledWrite(fgRed, "[ERROR] ", fgDefault, repr(getCurrentException()), "\n")
       await req.respond(Http500, "Server error")
-      return
+      return ("", "")
 
   if content.kind == Node:
     content.data = $content.node
-  let headers = newHttpHeaders([("Content-Type", content.content_type)])
-  headers["Set-Cookie"] = server.writeSession(content)
-  await req.respond(Http200, content.data, headers)
+  return ("", "")
 
 proc parseQuery(query: string): Table[string, string] =
   for token in query.split('&'):
@@ -434,13 +465,18 @@ proc handleRequest*(server: CandyServer, req: Request) {.async, gcsafe.} =
   let 
     verb = $req.reqMethod
     path = decodeUrl(req.url.path)
-    components = path.split('/')
+    #components = path.split('/')
 
   server.log(Info, verb & " " & path)
 
   var 
-    bodyParams = await server.formParser.parseBody(req)
+    bodyParams: Table[string, string]
     queryParams = parseQuery(decodeUrl(req.url.query))
+  try:
+    bodyParams = await server.formParser.parseBody(req)
+  except:
+    let e = getCurrentException()
+    server.log(Error, e.msg.split('\n')[0])
   let page = queryParams.getOrDefault("page", "0").parseInt
   let limit = queryParams.getOrDefault("limit", "10").parseInt
   queryParams["offset"] = $(page * limit)
@@ -448,37 +484,63 @@ proc handleRequest*(server: CandyServer, req: Request) {.async, gcsafe.} =
   queryParams["page"] = $page
   queryParams["limit"] = $limit
 
-  for route in server.routes:
-    if route.components.len == components.len and route.verb == verb:
-      var 
-        variables = initTable[string, string]()
-        found = true
-      for i in 0..components.len - 1:
-        let
-          value = components[i] 
-          name = route.components[i]
-        if name.len > 1 and name[0] == '{' and name[^1] == '}':
-          variables[name[1..^2]] = value
-        else:
-          if value != name:
-            found = false
-            break
-      if found:
-        for key, value in bodyParams.pairs:
-          variables[key] = value
-        for key, value in queryParams.pairs:
-          variables[key] = value
-        await server.handleRoute(req, route, variables)
-        return
-  for directory in server.staticPaths:
-    let filename = joinPath(getCurrentDir(), directory, "/" & path.replace("/../", "/"))
-    if fileExists(filename):
-      server.log(Debug, "static file \"" & filename & "\"")
-      await server.sendFile(req, filename)
-      return
-  server.log(Debug, "not found")
-  await req.respond(Http404, "Not found")
+  var content = Content(kind: Data, data: "{}", content_type: "application/json")
+  discard server.readSession(req, content)
+  server.log(Debug, "session = " & $content.session)
 
+  var found = false
+  var queue = initDeque[tuple[verb: string, path: string]]()
+  queue.addFirst((verb, path))
+  var depth = 0
+  while queue.len > 0 and depth < 16:
+    let (verb, path) = queue.popLast()
+    let components = path.split('/')
+    for route in server.routes:
+      if route.components.len == components.len and route.verb == verb:
+        var 
+          variables = initTable[string, string]()
+        found = true
+        for i in 0..components.len - 1:
+          let
+            value = components[i] 
+            name = route.components[i]
+          if name.len > 1 and name[0] == '{' and name[^1] == '}':
+            variables[name[1..^2]] = value
+          else:
+            if value != name:
+              found = false
+              break
+        if found:
+          for key, value in bodyParams.pairs:
+            variables[key] = value
+          for key, value in queryParams.pairs:
+            variables[key] = value
+          content.variables = variables
+          let (verb, path) = await server.handleRoute(req, route, content)
+          if verb != "":
+            queue.addFirst((verb, path))
+          break
+
+    if not found:
+      for directory in server.staticPaths:
+        let filename = joinPath(getCurrentDir(), directory, "/" & path.replace("/../", "/"))
+        if fileExists(filename):
+          server.log(Debug, "static file \"" & filename & "\"")
+          await server.sendFile(req, filename)
+          return
+    inc depth
+
+  if depth == 16:
+    server.log(Debug, "Chaining depth exceeded == 16")
+    await req.respond(Http500, "Server error")
+  if not found:
+    server.log(Debug, "not found")
+    await req.respond(Http404, "Not found")
+    return
+
+  let headers = newHttpHeaders([("Content-Type", content.content_type)])
+  headers["Set-Cookie"] = server.writeSession(content)
+  await req.respond(Http200, content.data, headers)
 
 when isMainModule:
   var server {.threadvar.}: CandyServer

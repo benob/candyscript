@@ -1,0 +1,17 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <script src="todo.js"></script>
+  </head>
+  <body onload="refresh()">
+    <h1>Todo</h1>
+    <div id="error"></div>
+    <form>
+      <input id="due" type="date" name="due">
+      <input id="text" type="text" name="text">
+      <input type="button" onclick="add(this.form.due.value, this.form.text.value)" value="Add">
+    </form>
+    <input id="pending" type="checkbox" name="pending" checked onclick="refresh()"> Hide done items
+    <ul id="todo"></ul>
+  </body>
+</html>

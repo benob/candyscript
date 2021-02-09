@@ -14,6 +14,9 @@ DIR examples/
 STATIC public
 STATIC img
 
+# DB load sqlite3 database
+DB user.db
+
 # executed at startup
 STARTUP SHELL uname -a
 STARTUP SQL create table if not exists users (id integer primary key, name text)
@@ -41,9 +44,6 @@ GET /ex/{fn} READ ./{fn}
 GET /json JSON {"a": 1, "b": 2}
 GET /json JSON {"a": 1, "b": 2} | VIEW views/json.html
 
-# DB load sqlite3 database
-DB user.db
-
 # SQL returns json representation of an sqlite query
 GET /user/{id} SQL select * from users where id = {id}
 PUT /user/{name} SQL insert into users (name) values ({id})
@@ -66,6 +66,8 @@ GET /uptime SHELL uptime
 
 # REDIRECT sets up a redirection with the Location header
 GET /google REDIRECT https://google.com
+# TODO: REROUTE passes the current request/content to a different route (warning: cycles)
+#GET /modify SQL insert into ... | REROUTE /view
 
 # AUTH as a directive allows a user:password pair
 AUTH user:password
@@ -90,4 +92,12 @@ GET /logout SESSION name= | TEXT killed session
 
 #TODO: put sql result in variables so that it can be set in sessions
 #POST /login SESSION select id as user_id from user where name = {name} and password = {password} | SESSION user_id={user_id}
+
+# CHAIN continues processing with a different route (but keeps content and variables)
+# maximum depth is 16
+GET /chain/a/{name} TEXT Hi name={name} other={other}
+GET /chain/b/{other} CHAIN GET /chain/a/{other}
+
+# TYPE changes content type of response
+GET /data TEXT alert('hi there') | TYPE text/javascript
 
